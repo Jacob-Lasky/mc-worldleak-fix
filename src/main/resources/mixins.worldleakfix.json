@@ -1,0 +1,16 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "io.github.jacoblasky.worldleakfix.mixin",
+  "compatibilityLevel": "JAVA_8",
+  "target": "@env(DEFAULT)",
+  "client": [
+    "ChunkProviderClientAccessor",
+    "MixinMinecraft",
+    "WorldAccessor",
+    "WorldClientAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

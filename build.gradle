@@ -1,0 +1,124 @@
+// MeatballCraft CLIENT dimension-hop memory leak fix -- a client-side Mixin coremod for
+// MeatballCraft (Cleanroom / MC 1.12.2). See README.md for the measured cause.
+//
+// Built on RetroFuturaGradle, NOT ForgeGradle 2.3, for the reason recorded in
+// the original build investigation: Forge's maven no longer publishes the `forge-1.12.2-<ver>-userdev.jar` FG2 resolves against, only the
+// FG3-layout `userdev3`, which FG2 cannot read. DO NOT "simplify" this to ForgeGradle 2.3.
+
+plugins {
+    id 'java'
+    id 'com.gtnewhorizons.retrofuturagradle' version '2.0.6'
+}
+
+group = 'io.github.jacoblasky'
+version = project.mod_version
+base { archivesName.set('mc-worldleak-fix') }
+
+java {
+    toolchain {
+        // Minecraft 1.12.2 must be compiled by Java 8. Gradle itself runs on a modern JDK;
+        // the foojay resolver in settings.gradle provisions this toolchain if absent.
+        languageVersion.set(JavaLanguageVersion.of(8))
+        vendor.set(JvmVendorSpec.AZUL)
+    }
+}
+
+minecraft {
+    mcVersion.set(project.minecraft_version)
+    mcpMappingChannel.set(project.mapping_channel)
+    mcpMappingVersion.set(project.mapping_version)
+}
+
+// Compile against jars FROM THE PACK rather than maven: Modular Machinery CE and MixinBooter at
+// the exact builds the pack runs. MixinBooter also supplies the bundled org.spongepowered.asm.*.
+//
+// GLOB, NOT A PINNED FILENAME, so a pack update that bumps a jar does not fail on a path that no
+// longer exists. Two matches is an error rather than a coin flip.
+def packJars = [
+    mmce_jar       : 'ModularMachinery-CE-*.jar',
+    mixinbooter_jar: '*mixinbooter-*.jar',
+]
+
+def resolvePackJar = { String prop, String pattern ->
+    def explicit = project.findProperty(prop)
+    if (explicit) {
+        return file(explicit)
+    }
+    def dir = project.findProperty('pack_mods')
+    if (!dir) {
+        return null
+    }
+    def matches = file(dir).listFiles()?.findAll { it.name ==~ pattern.replace('*', '.*') }
+    if (!matches) {
+        return null
+    }
+    if (matches.size() > 1) {
+        throw new GradleException(
+            "pack_mods=${dir} has ${matches.size()} jars matching ${pattern}: " +
+            "${matches*.name.sort()}. Remove one, or name the right one with -P${prop}=")
+    }
+    return matches[0]
+}
+
+def resolvedPackJars = packJars.collectEntries { prop, pattern ->
+    [(prop): resolvePackJar(prop, pattern)]
+}
+
+dependencies {
+    resolvedPackJars.each { prop, jar ->
+        if (jar && jar.exists()) {
+            compileOnly files(jar)
+        }
+    }
+}
+
+// Fail with one actionable message listing EVERY missing jar, rather than 40 "package does not
+// exist" errors.
+tasks.register('checkPackJars') {
+    doFirst {
+        def problems = []
+        packJars.each { prop, pattern ->
+            def jar = resolvedPackJars[prop]
+            if (!jar) {
+                problems << "  ${prop}: no ${pattern} found"
+            } else if (!jar.exists()) {
+                problems << "  ${prop}: does not exist: ${jar}"
+            }
+        }
+        if (problems) {
+            throw new GradleException(
+                "Missing pack jars:\n${problems.join('\n')}\n" +
+                'Point -Ppack_mods=<dir> at an instance mods/ directory holding all of ' +
+                "${packJars.values().join(', ')}, or name one with -P<prop>=<path>.")
+        }
+    }
+}
+tasks.named('compileJava') { dependsOn 'checkPackJars' }
+
+// NO MIXIN ANNOTATION PROCESSOR AND NO REFMAP, deliberately -- do not "fix" this by adding one.
+//
+//   * Vanilla targets named INSIDE annotations (Minecraft#loadWorld/#runTick, the @Accessor
+//     fields) are written as their runtime SRG names (func_71353_a, field_73236_b, ...) with
+//     `remap = false`. Those names were checked against MCP stable_39's mcp-srg.srg and against
+//     the live client's stack traces, which run SRG names. A refmap would only translate the
+//     MCP spelling to these same strings.
+//   * Modular Machinery CE members (TaskExecutor#addSyncTask, ...) are mod-owned and never
+//     remapped, so they carry `remap = false` too.
+//   * Minecraft members used in mixin BODIES (world, loadedEntityList, getChunkProvider(), ...)
+//     are ordinary bytecode references that RFG's reobfJar rewrites MCP -> SRG with the rest of
+//     the jar. 1.12.2 keeps MCP *class* names at runtime, so class literals are already right.
+//
+// Consequence: the mixin JSONs intentionally have no "refmap" key.
+
+jar {
+    manifest {
+        attributes(
+            // A PURE COREMOD, NOT AN FML MOD: no @Mod class, so the
+            // jar stays out of FML's mod list and the client<->server handshake. The server
+            // needs nothing. DO NOT ADD `FMLCorePluginContainsFMLMod`: it would declare an FML
+            // mod where none exists and make the loader expect one.
+            'FMLCorePlugin' : 'io.github.jacoblasky.worldleakfix.CorePlugin',
+            'ForceLoadAsMod': 'false',
+        )
+    }
+}
